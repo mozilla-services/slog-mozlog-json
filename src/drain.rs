@@ -27,7 +27,7 @@ use std::{cell::RefCell, env, fmt, fmt::Write, io, process, result, str::FromStr
 use serde::ser::SerializeMap;
 use slog::{FnValue, Key, OwnedKVList, Record, SendSyncRefUnwindSafeKV, KV};
 
-use crate::util::level_to_severity;
+use crate::util::{level_to_gcp_severity, level_to_severity};
 
 // }}}
 
@@ -326,9 +326,10 @@ where
         if self.gcp {
             values.push(
                 o!(
-                    "severity" => FnValue(|record : &Record| record.level().to_string().to_uppercase()),
+                    "severity" => FnValue(|record : &Record| level_to_gcp_severity(record.level())),
                     // TODO: add additional components? https://cloud.google.com/logging/docs/structured-logging#special-payload-fields
-                ).into()
+                )
+                .into(),
             );
         } else {
             values.push(
@@ -346,7 +347,7 @@ where
         }
     }
 
-    /// Turn on GCP support 
+    /// Turn on GCP support
     pub fn enable_gcp(mut self) -> Self {
         self.gcp = true;
         self
