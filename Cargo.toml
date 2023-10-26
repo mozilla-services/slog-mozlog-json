@@ -6,6 +6,7 @@ description = "MozLog JSON drain for slog-rs"
 repository = "https://github.com/mozilla-services/slog-mozlog-json/"
 homepage = "https://github.com/mozilla-services/slog-mozlog-json/"
 license = "MPL-2.0"
+edition = "2021"
 
 [badges]
 travis-ci = { repository = "mozilla-services/slog-mozlog-json" }

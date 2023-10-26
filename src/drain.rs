@@ -16,20 +16,18 @@
 //!     );
 //! }
 //! ```
+//!
+//! If the OS Environment variable "MOZLOG_GCP" is present and set to "true",
+//! MozLog will output a Google Cloud Platform logging compliant JSON string.
 // }}}
 
 // {{{ Imports & meta
-use std::{fmt, io, process, result, cell::RefCell, fmt::Write};
-
-use chrono;
-use serde;
-use serde_json;
-use slog;
+use std::{cell::RefCell, env, fmt, fmt::Write, io, process, result, str::FromStr};
 
 use serde::ser::SerializeMap;
 use slog::{FnValue, Key, OwnedKVList, Record, SendSyncRefUnwindSafeKV, KV};
 
-use util::level_to_severity;
+use crate::util::{level_to_gcp_severity, level_to_severity};
 
 // }}}
 
@@ -50,9 +48,10 @@ struct SerdeSerializer<S: serde::Serializer> {
 impl<S: serde::Serializer> SerdeSerializer<S> {
     /// Start serializing map of values
     fn start(ser: S, len: Option<usize>) -> result::Result<Self, slog::Error> {
-        let ser_map = ser.serialize_map(len)
+        let ser_map = ser
+            .serialize_map(len)
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "serde serialization error"))?;
-        Ok(SerdeSerializer { ser_map: ser_map })
+        Ok(SerdeSerializer { ser_map })
     }
 
     /// Finish serialization, and return the serializer
@@ -170,7 +169,7 @@ where
     }
 
     /// Build custom `Json` `Drain`
-    #[cfg_attr(feature = "cargo-clippy", allow(new_ret_no_self))]
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(io: W) -> MozLogJsonBuilder<W> {
         MozLogJsonBuilder::new(io)
     }
@@ -232,10 +231,10 @@ where
         let mut buf = io::Cursor::new(Vec::new());
         if self.pretty {
             let mut serializer = serde_json::Serializer::pretty(&mut buf);
-            self.log_placeholder_impl(&mut serializer, &rinfo)?;
+            self.log_placeholder_impl(&mut serializer, rinfo)?;
         } else {
             let mut serializer = serde_json::Serializer::new(&mut buf);
-            self.log_placeholder_impl(&mut serializer, &rinfo)?;
+            self.log_placeholder_impl(&mut serializer, rinfo)?;
         };
         let payload = String::from_utf8(buf.into_inner()).unwrap();
 
@@ -243,17 +242,17 @@ where
         let mut buf = io::Cursor::new(Vec::new());
         if self.pretty {
             let mut serializer = serde_json::Serializer::pretty(&mut buf);
-            self.log_fields_impl(&mut serializer, &rinfo, &logger_values)?;
+            self.log_fields_impl(&mut serializer, rinfo, logger_values)?;
         } else {
             let mut serializer = serde_json::Serializer::new(&mut buf);
-            self.log_fields_impl(&mut serializer, &rinfo, &logger_values)?;
+            self.log_fields_impl(&mut serializer, rinfo, logger_values)?;
         };
         let fields = String::from_utf8(buf.into_inner()).unwrap();
 
         // And now we replace the placeholder with the contents
         let mut payload = payload.replace("\"00PLACEHOLDER00\"", fields.as_str());
         // For some reason the replace loses an end }
-        payload.push_str("}");
+        payload.push('}');
 
         let mut io = self.io.borrow_mut();
         io.write_all(payload.as_bytes())?;
@@ -278,6 +277,7 @@ pub struct MozLogJsonBuilder<W: io::Write> {
     logger_name: Option<String>,
     msg_type: Option<String>,
     hostname: Option<String>,
+    gcp: bool,
 }
 
 impl<W> MozLogJsonBuilder<W>
@@ -288,11 +288,13 @@ where
         MozLogJsonBuilder {
             newlines: true,
             values: vec![],
-            io: io,
+            io,
             pretty: false,
             logger_name: None,
             msg_type: None,
             hostname: None,
+            gcp: bool::from_str(&env::var("MOZLOG_GCP").unwrap_or("false".to_owned()))
+                .unwrap_or(false),
         }
     }
 
@@ -314,15 +316,27 @@ where
             o!(
             "Timestamp" => FnValue(|_ : &Record| {
                 let now = chrono::Utc::now();
-                let nsec: i64 = (now.timestamp() as i64) * 1_000_000_000;
+                let nsec: i64 = now.timestamp() * 1_000_000_000;
                 nsec + (now.timestamp_subsec_nanos() as i64)
             }),
-            "Severity" => FnValue(|record : &Record| {
-                level_to_severity(record.level())
-            }),
             "Pid" => process::id(),
-            ).into(),
+            )
+            .into(),
         );
+        if self.gcp {
+            values.push(
+                o!(
+                    "severity" => FnValue(|record : &Record| level_to_gcp_severity(record.level())),
+                    // TODO: add additional components? https://cloud.google.com/logging/docs/structured-logging#special-payload-fields
+                )
+                .into(),
+            );
+        } else {
+            values.push(
+                o!("Severity" => FnValue(|record : &Record| level_to_severity(record.level())))
+                    .into(),
+            )
+        }
         self.values.extend(values);
 
         MozLogJson {
@@ -333,6 +347,11 @@ where
         }
     }
 
+    /// Turn on GCP support
+    pub fn enable_gcp(mut self) -> Self {
+        self.gcp = true;
+        self
+    }
     /// Set writing a newline after every log record
     pub fn set_newlines(mut self, enabled: bool) -> Self {
         self.newlines = enabled;
